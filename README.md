@@ -149,3 +149,412 @@
 - Direct all writes to the source. Reads can be sent to either the source server or the read pool.
 - **Use Case**: A read pool allows to scale reads horizontally for read-intensive applications.
 - **Caveats**: Application must have some tolerance for stale reads. You will never be able to guarantee that a write you complete on the source has already been replicated to a replica.
+
+## Hands-on: Create A MySQL Cluster with One Source Server & Two Replica Servers
+
+### Step 1: Set Up MySQL Cluster
+
+#### 1.1 Install MySQL
+
+- On Mac, use Homebrew to install MySQL
+
+```bash
+brew install mysql
+```
+
+- For other systems, refer to the installation guide [here](https://dev.mysql.com/doc/refman/8.4/en/installing.html)
+
+#### 1.2 Start MySQL Service
+
+```bash
+brew services start mysql
+```
+
+#### 1.3 Create a New User (Optional)
+
+- Log into MySQL
+
+```bash
+mysql -u root
+```
+
+- Create a new user
+
+```sql
+CREATE USER 'username'@'localhost' IDENTIFIED BY 'user_password';
+GRANT ALL PRIVILEGES ON *.* TO 'username'@'localhost' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+```
+
+- Exit MySQL
+
+```bash
+exit;
+```
+
+#### 1.4 Restart MySQL Service
+
+```bash
+brew services start mysql
+```
+
+#### 1.5 Connect to MySQL with New User
+
+- Now you should be able to access MySQL with the new user or the root user using the password you set in 1.3.
+
+```bash
+mysql -u username -p
+```
+
+## Step 2: Configure the Source Server
+
+### 2.1 Create Database (Optional)
+
+```bash
+mysql -u username -p
+CREATE DATABASE your_database_name;
+exit;
+```
+
+- To check if the database has successfully been created or not, run the following command:
+
+```sql
+SHOW DATABASES;
+```
+
+### 2.2 Enable Binary Logging on Source Server
+
+- The default config file for MySQL installed via Homebrew is located at `/opt/homebrew/etc/my.cnf`. Open the file in your favorite editor and modify the parameters as needed:
+
+```bash
+sudo vim /opt/homebrew/etc/my.cnf
+```
+
+> The config file has sections specified by `section_name`. All the parameters related to a section can be put under them, for example:
+>
+> ```bash
+> # [mysql]: Section is read by the mysql command-line client
+> # [mysqld]: Section is read by the mysql server
+> [mysqld] <---section name
+> <parameter_name> = <value> <---parameter values
+> # [client]: Section is read by all connecting clients (including mysql cli)
+> [client]
+> <parameter_name> = <value>
+> # [mysqldump]: The section is read by the backup utility called mysqldump
+> [mysqldump]
+> <parameter_name> = <value>
+> # [mysqld_safe]: Read by the mysqld_safe process (MySQL Server Startup Script)
+> [mysqld_safe]
+> <parameter_name> = <value>
+> [server]
+> <parameter_name> = <value>
+> ```
+
+- To enable binlog, you have to set `log_bin` and `server_id` and restart the server.
+
+```bash
+[mysqld]
+server-id = 1
+log_bin = /opt/homebrew/var/mysql/source-binlog
+binlog_do_db = cluster_db_test
+```
+
+### 2.3 Restart the MySQL Service
+
+- Restart the MySQL service to apply the new configuration
+
+```bash
+brew services restart mysql
+```
+
+### 2.4 Verify Binary Logs Creation
+
+```bash
+mysql -u username -p
+```
+
+```sql
+SHOW VARIABLES LIKE 'log_bin%';
+```
+
+- Output should look like this:
+
+```
++---------------------------------+---------------------------------------------+
+| Variable_name                   | Value                                       |
++---------------------------------+---------------------------------------------+
+| log_bin                         | ON                                          |
+| log_bin_basename                | /opt/homebrew/var/mysql/source-binlog       |
+| log_bin_index                   | /opt/homebrew/var/mysql/source-binlog.index |
+| log_bin_trust_function_creators | OFF                                         |
++---------------------------------+---------------------------------------------+
+4 rows in set (0.02 sec)
+```
+
+### 2.5 Create a Replication User
+
+- The replicas connect to the source using this account
+
+```bash
+mysql -u username -p
+```
+
+```sql
+CREATE USER 'replica_user'@'%' IDENTIFIED BY 'replica_password';
+GRANT REPLICATION SLAVE ON *.* TO 'replica_user'@'%';
+FLUSH PRIVILEGES;
+```
+
+### 2.6 Flush Tables & Acquire Global Read Lock
+
+```sql
+FLUSH TABLES WITH READ LOCK;
+```
+
+### 2.7 Check the Source Server Status
+
+```sql
+SHOW MASTER STATUS;
+```
+
+## Step 3: Configure the Replica Servers
+
+### 3.1 Create Separate Data Directories
+
+- Since I am running multiple MySQL instances on the same machine, I need to create separate configuration files, data directories, and start each instance with its own configuration.
+
+```bash
+mkdir -p /opt/homebrew/var/mysql1
+mkdir -p /opt/homebrew/var/mysql2
+```
+
+### 3.2 Create Separate Configuration Files
+
+#### 3.2.1 Configuration for Replica 1
+
+```bash
+sudo vim /opt/homebrew/etc/my1.cnf
+```
+
+```bash
+[mysqld]
+server-id = 2
+port = 3307
+datadir = /opt/homebrew/var/mysql1
+socket = /tmp/mysql1.sock
+log_bin = /opt/homebrew/var/mysql1/source-binlog
+relay-log = /opt/homebrew/var/mysql1/replica1-binlog
+pid-file = /opt/homebrew/var/mysql1/mysql.pid
+```
+
+#### 3.2.2 Configuration for Replica 2
+
+```bash
+sudo vim /opt/homebrew/etc/my2.cnf
+```
+
+```bash
+[mysqld]
+server-id = 3
+port = 3308
+datadir = /opt/homebrew/var/mysql2
+socket = /tmp/mysql2.sock
+log_bin = /opt/homebrew/var/mysql2/source-binlog
+relay-log = /opt/homebrew/var/mysql2/replica2-binlog
+pid-file = /opt/homebrew/var/mysql2/mysql.pid
+```
+
+### 3.3 Initialize Data Directories
+
+```bash
+mysqld --initialize --datadir=/opt/homebrew/var/mysql1 --user=$(whoami)
+mysqld --initialize --datadir=/opt/homebrew/var/mysql2 --user=$(whoami)
+```
+
+### 3.4 Start Each Replica Instance
+
+```bash
+mysqld_safe --defaults-file=/opt/homebrew/etc/my1.cnf --skip-grant-tables &
+mysqld_safe --defaults-file=/opt/homebrew/etc/my2.cnf --skip-grant-tables &
+```
+
+## Step 4: Configure Replication on Each Replica
+
+### 4.1 Log into the MySQL Server on Replica
+
+```bash
+mysql --socket=/tmp/mysql1.sock
+```
+
+### 4.2 Configure the Replica to Start Replication
+
+```sql
+CHANGE MASTER TO
+    MASTER_HOST='192.168.1.105',
+    MASTER_USER='replica',
+    MASTER_PASSWORD='replica',
+    MASTER_LOG_FILE='source-binlog.000004',
+    MASTER_LOG_POS=158;
+START SLAVE;
+```
+
+- Run the following command to get the `binary log file name` and `position`:
+
+```bash
+brew services start mysql
+mysql -u username -p
+```
+
+```sql
+SHOW MASTER STATUS;
+```
+
+```
++----------------------+----------+-----------------+------------------+-------------------+
+| File                 | Position | Binlog_Do_DB    | Binlog_Ignore_DB | Executed_Gtid_Set |
++----------------------+----------+-----------------+------------------+-------------------+
+| source-binlog.000004 |      158 | cluster_db_test |                  |                   |
++----------------------+----------+-----------------+------------------+-------------------+
+```
+
+### 4.3 Verify the Replication Status
+
+```sql
+SHOW SLAVE STATUS\G
+```
+
+- Ensure that the `Slave_IO_Running` and `Slave_SQL_Running` fields are both **Yes**
+
+```sql
+mysql> SHOW SLAVE STATUS\G
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for source to send event
+                  Master_Host: 192.168.1.105
+                  Master_User: replica
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: source-binlog.000005
+          Read_Master_Log_Pos: 158
+               Relay_Log_File: replica1-binlog.000005
+                Relay_Log_Pos: 383
+        Relay_Master_Log_File: source-binlog.000005
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB:
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 158
+              Relay_Log_Space: 768
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 1
+                  Master_UUID: f042386a-242e-11ef-8309-6255818a3157
+             Master_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Replica has read all relay log; waiting for more updates
+           Master_Retry_Count: 10
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set:
+                Auto_Position: 0
+         Replicate_Rewrite_DB:
+                 Channel_Name:
+           Master_TLS_Version:
+       Master_public_key_path:
+        Get_master_public_key: 0
+            Network_Namespace:
+1 row in set, 1 warning (0.00 sec)
+```
+
+### 4.4 Repeat the Same Steps for Replica 2
+
+```sql
+mysql> SHOW SLAVE STATUS\G
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for source to send event
+                  Master_Host: 192.168.1.105
+                  Master_User: replica
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: source-binlog.000005
+          Read_Master_Log_Pos: 158
+               Relay_Log_File: replica2-binlog.000003
+                Relay_Log_Pos: 383
+        Relay_Master_Log_File: source-binlog.000005
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB:
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 158
+              Relay_Log_Space: 768
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 1
+                  Master_UUID: f042386a-242e-11ef-8309-6255818a3157
+             Master_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Replica has read all relay log; waiting for more updates
+           Master_Retry_Count: 10
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set:
+                Auto_Position: 0
+         Replicate_Rewrite_DB:
+                 Channel_Name:
+           Master_TLS_Version:
+       Master_public_key_path:
+        Get_master_public_key: 0
+            Network_Namespace:
+1 row in set, 1 warning (0.01 sec)
+```
